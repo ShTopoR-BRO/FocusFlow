@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import UserNotifications
+import Charts
 
 // MARK: - Модель задачи
 struct Task: Identifiable, Codable {
@@ -18,6 +19,54 @@ struct Task: Identifiable, Codable {
         self.completedSessions = completedSessions
         self.createdAt = Date()
         self.isActive = isActive
+    }
+}
+
+// MARK: - Модель статистики
+struct DailyStats: Codable {
+    let date: Date
+    var completedSessions: Int
+    var totalFocusTime: TimeInterval
+    
+    init(date: Date = Date(), completedSessions: Int = 0, totalFocusTime: TimeInterval = 0) {
+        self.date = date
+        self.completedSessions = completedSessions
+        self.totalFocusTime = totalFocusTime
+    }
+}
+
+struct WeeklyStats: Codable {
+    var dailyStats: [DailyStats]
+    
+    var totalSessions: Int {
+        dailyStats.reduce(0) { $0 + $1.completedSessions }
+    }
+    
+    var totalFocusTime: TimeInterval {
+        dailyStats.reduce(0) { $0 + $1.totalFocusTime }
+    }
+    
+    var averageDailySessions: Double {
+        guard !dailyStats.isEmpty else { return 0 }
+        return Double(totalSessions) / Double(dailyStats.count)
+    }
+}
+
+struct MonthlyStats: Codable {
+    var weeklyStats: [WeeklyStats]
+    
+    var totalSessions: Int {
+        weeklyStats.reduce(0) { $0 + $1.totalSessions }
+    }
+    
+    var totalFocusTime: TimeInterval {
+        weeklyStats.reduce(0) { $0 + $1.totalFocusTime }
+    }
+    
+    var averageDailySessions: Double {
+        let totalDays = weeklyStats.reduce(0) { $0 + $1.dailyStats.count }
+        guard totalDays > 0 else { return 0 }
+        return Double(totalSessions) / Double(totalDays)
     }
 }
 
@@ -92,6 +141,7 @@ class TimerViewModel: ObservableObject {
     @Published var editingTask: Task?
     @Published var taskTitle = ""
     @Published var taskDescription = ""
+    @Published var showingStats = false
     
     // MARK: - Private Properties
     private var timer: Timer?
@@ -100,6 +150,16 @@ class TimerViewModel: ObservableObject {
     private let pomodorosBeforeLongBreak = 4
     private let tasksKey = "savedTasks"
     private let activeTaskIdKey = "activeTaskId"
+    private let statsKey = "dailyStats"
+    
+    // MARK: - Stats Properties
+    @Published var dailyStats: [DailyStats] = []
+    @Published var selectedPeriod: StatsPeriod = .week
+    
+    enum StatsPeriod: String, CaseIterable {
+        case week = "Week"
+        case month = "Month"
+    }
     
     // MARK: - Computed Properties
     var progress: Double {
@@ -145,12 +205,98 @@ class TimerViewModel: ObservableObject {
         activeTask?.title ?? "No Active Task"
     }
     
+    // MARK: - Stats Computed Properties
+    var todayStats: DailyStats {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        return dailyStats.first { calendar.isDate($0.date, inSameDayAs: today) } ?? DailyStats(date: today)
+    }
+    
+    var weeklyStats: WeeklyStats {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        guard let weekAgo = calendar.date(byAdding: .day, value: -7, to: today) else {
+            return WeeklyStats(dailyStats: [])
+        }
+        
+        let weekStats = dailyStats.filter { $0.date >= weekAgo && $0.date <= today }
+        return WeeklyStats(dailyStats: weekStats)
+    }
+    
+    var monthlyStats: MonthlyStats {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        guard let monthAgo = calendar.date(byAdding: .day, value: -30, to: today) else {
+            return MonthlyStats(weeklyStats: [])
+        }
+        
+        let monthStats = dailyStats.filter { $0.date >= monthAgo && $0.date <= today }
+        var weeklyGroups: [WeeklyStats] = []
+        
+        for weekOffset in 0..<4 {
+            let weekStart = calendar.date(byAdding: .day, value: -7 * (3 - weekOffset), to: monthAgo) ?? monthAgo
+            let weekEnd = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? today
+            
+            let weekStats = monthStats.filter { $0.date >= weekStart && $0.date <= weekEnd }
+            if !weekStats.isEmpty {
+                weeklyGroups.append(WeeklyStats(dailyStats: weekStats))
+            }
+        }
+        
+        return MonthlyStats(weeklyStats: weeklyGroups)
+    }
+    
+    var totalFocusTimeFormatted: String {
+        let totalSeconds = dailyStats.reduce(0) { $0 + $1.totalFocusTime }
+        let hours = Int(totalSeconds) / 3600
+        let minutes = (Int(totalSeconds) % 3600) / 60
+        return String(format: "%dh %dm", hours, minutes)
+    }
+    
+    var averageDailySessions: Double {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        guard let startDate = calendar.date(byAdding: .day, value: -30, to: today) else { return 0 }
+        
+        let filtered = dailyStats.filter { $0.date >= startDate && $0.date <= today }
+        let totalDays = max(1, filtered.count)
+        let totalSessions = filtered.reduce(0) { $0 + $1.completedSessions }
+        return Double(totalSessions) / Double(totalDays)
+    }
+    
+    var chartData: [(date: Date, sessions: Int)] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let days: Int
+        
+        switch selectedPeriod {
+        case .week:
+            days = 7
+        case .month:
+            days = 30
+        }
+        
+        guard let startDate = calendar.date(byAdding: .day, value: -days, to: today) else { return [] }
+        
+        var result: [(date: Date, sessions: Int)] = []
+        var currentDate = startDate
+        
+        while currentDate <= today {
+            let dayStats = dailyStats.first { calendar.isDate($0.date, inSameDayAs: currentDate) }
+            result.append((date: currentDate, sessions: dayStats?.completedSessions ?? 0))
+            currentDate = calendar.date(byAdding: .day, value: 1, to: currentDate) ?? currentDate
+        }
+        
+        return result
+    }
+    
     // MARK: - Initialization
     init() {
         self.initialDuration = TimerMode.focus.duration
         self.timeRemaining = initialDuration
         loadTasks()
         loadThemePreference()
+        loadStats()
         requestNotificationPermission()
     }
     
@@ -222,12 +368,10 @@ class TimerViewModel: ObservableObject {
     }
     
     func selectTask(_ task: Task) {
-        // Деактивируем все задачи
         for index in tasks.indices {
             tasks[index].isActive = false
         }
         
-        // Активируем выбранную
         if let index = tasks.firstIndex(where: { $0.id == task.id }) {
             tasks[index].isActive = true
             activeTaskId = task.id
@@ -294,6 +438,7 @@ class TimerViewModel: ObservableObject {
     private func handleFocusCompletion() {
         completedPomodoros += 1
         addSessionToActiveTask()
+        saveSessionStats()
         
         let nextMode: TimerMode = shouldStartLongBreak ? .longBreak : .shortBreak
         
@@ -362,6 +507,37 @@ class TimerViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Stats Methods
+    private func saveSessionStats() {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        
+        if let index = dailyStats.firstIndex(where: { calendar.isDate($0.date, inSameDayAs: today) }) {
+            dailyStats[index].completedSessions += 1
+            dailyStats[index].totalFocusTime += TimerMode.focus.duration
+        } else {
+            let newStats = DailyStats(date: today, completedSessions: 1, totalFocusTime: TimerMode.focus.duration)
+            dailyStats.append(newStats)
+        }
+        
+        saveStats()
+    }
+    
+    private func saveStats() {
+        if let encoded = try? JSONEncoder().encode(dailyStats) {
+            UserDefaults.standard.set(encoded, forKey: statsKey)
+        }
+    }
+    
+    private func loadStats() {
+        guard let data = UserDefaults.standard.data(forKey: statsKey),
+              let decoded = try? JSONDecoder().decode([DailyStats].self, from: data) else {
+            dailyStats = []
+            return
+        }
+        dailyStats = decoded
+    }
+    
     // MARK: - Persistence
     private func saveTasks() {
         if let encoded = try? JSONEncoder().encode(tasks) {
@@ -372,7 +548,6 @@ class TimerViewModel: ObservableObject {
     private func loadTasks() {
         guard let data = UserDefaults.standard.data(forKey: tasksKey),
               let decoded = try? JSONDecoder().decode([Task].self, from: data) else {
-            // Создаем пример задачи при первом запуске
             let sampleTask = Task(title: "Sample Task", description: "This is a sample task")
             tasks = [sampleTask]
             activeTaskId = sampleTask.id
@@ -411,13 +586,283 @@ class TimerViewModel: ObservableObject {
     }
 }
 
+// MARK: - Статистика
+struct StatsView: View {
+    @ObservedObject var viewModel: TimerViewModel
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 20) {
+                    // Период выбора
+                    Picker("Period", selection: $viewModel.selectedPeriod) {
+                        ForEach(TimerViewModel.StatsPeriod.allCases, id: \.self) { period in
+                            Text(period.rawValue).tag(period)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal)
+                    
+                    // Карточки статистики
+                    LazyVGrid(columns: [
+                        GridItem(.flexible()),
+                        GridItem(.flexible())
+                    ], spacing: 16) {
+                        StatsCard(
+                            title: "Today",
+                            value: "\(viewModel.todayStats.completedSessions)",
+                            subtitle: "sessions",
+                            icon: "calendar.circle.fill",
+                            color: .blue
+                        )
+                        
+                        StatsCard(
+                            title: "Week",
+                            value: "\(viewModel.weeklyStats.totalSessions)",
+                            subtitle: "sessions",
+                            icon: "calendar.circle.fill",
+                            color: .green
+                        )
+                        
+                        StatsCard(
+                            title: "Month",
+                            value: "\(viewModel.monthlyStats.totalSessions)",
+                            subtitle: "sessions",
+                            icon: "calendar.circle.fill",
+                            color: .purple
+                        )
+                        
+                        StatsCard(
+                            title: "Avg/Day",
+                            value: String(format: "%.1f", viewModel.averageDailySessions),
+                            subtitle: "sessions",
+                            icon: "chart.bar.fill",
+                            color: .orange
+                        )
+                    }
+                    .padding(.horizontal)
+                    
+                    // Всего времени
+                    StatsCardFull(
+                        title: "Total Focus Time",
+                        value: viewModel.totalFocusTimeFormatted,
+                        icon: "clock.fill",
+                        color: .indigo
+                    )
+                    .padding(.horizontal)
+                    
+                    // График
+                    StatsChartView(viewModel: viewModel)
+                        .padding(.horizontal)
+                    
+                    // Детальная статистика по дням
+                    StatsDailyBreakdownView(viewModel: viewModel)
+                        .padding(.horizontal)
+                }
+                .padding(.vertical)
+            }
+            .background(viewModel.backgroundColor)
+            .navigationTitle("Statistics")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(viewModel.isDarkMode ? .dark : .light)
+    }
+}
+
+// MARK: - График статистики (исправленная версия)
+struct StatsChartView: View {
+    @ObservedObject var viewModel: TimerViewModel
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Activity Chart")
+                .font(.headline)
+                .foregroundColor(viewModel.textColor)
+            
+            Chart {
+                ForEach(viewModel.chartData, id: \.date) { item in
+                    BarMark(
+                        x: .value("Date", item.date, unit: .day),
+                        y: .value("Sessions", item.sessions)
+                    )
+                    .foregroundStyle(item.sessions > 0 ? Color.blue : Color.gray.opacity(0.3))
+                    .cornerRadius(4)
+                }
+            }
+            .frame(height: 200)
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .day, count: viewModel.selectedPeriod == .week ? 1 : 3)) { value in
+                    AxisValueLabel(format: .dateTime.day().month())
+                }
+            }
+            .chartYAxis {
+                AxisMarks { value in
+                    AxisValueLabel()
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(viewModel.secondaryBackgroundColor)
+        )
+    }
+}
+
+// MARK: - Детальная статистика по дням
+struct StatsDailyBreakdownView: View {
+    @ObservedObject var viewModel: TimerViewModel
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Daily Breakdown")
+                .font(.headline)
+                .foregroundColor(viewModel.textColor)
+            
+            let lastSevenDays = viewModel.chartData.suffix(7).reversed()
+            
+            ForEach(Array(lastSevenDays), id: \.date) { item in
+                HStack {
+                    Text(item.date, format: .dateTime.day().month().year())
+                        .font(.subheadline)
+                        .foregroundColor(viewModel.textColor)
+                    
+                    Spacer()
+                    
+                    HStack(spacing: 4) {
+                        let sessionCount = min(item.sessions, 5)
+                        ForEach(0..<sessionCount, id: \.self) { _ in
+                            Circle()
+                                .fill(Color.blue)
+                                .frame(width: 8, height: 8)
+                        }
+                        if item.sessions > 5 {
+                            Text("+\(item.sessions - 5)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        if item.sessions == 0 {
+                            Text("No sessions")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    Text("\(item.sessions)")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(viewModel.textColor)
+                        .frame(minWidth: 30)
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(viewModel.secondaryBackgroundColor)
+        )
+    }
+}
+
+// MARK: - Карточка статистики
+struct StatsCard: View {
+    let title: String
+    let value: String
+    let subtitle: String
+    let icon: String
+    let color: Color
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundColor(color)
+                
+                Spacer()
+            }
+            
+            Text(value)
+                .font(.title2)
+                .fontWeight(.bold)
+            
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            Text(subtitle)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.gray.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(color.opacity(0.2), lineWidth: 1)
+                )
+        )
+    }
+}
+
+// MARK: - Полная карточка статистики
+struct StatsCardFull: View {
+    let title: String
+    let value: String
+    let icon: String
+    let color: Color
+    
+    var body: some View {
+        HStack {
+            Image(systemName: icon)
+                .font(.title)
+                .foregroundColor(color)
+                .frame(width: 40)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                
+                Text(value)
+                    .font(.title2)
+                    .fontWeight(.bold)
+            }
+            
+            Spacer()
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.gray.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(color.opacity(0.2), lineWidth: 1)
+                )
+        )
+    }
+}
+
 // MARK: - Основное представление
 struct ContentView: View {
     @StateObject private var viewModel = TimerViewModel()
     
     var body: some View {
         ZStack {
-            // Фоновый градиент с учетом темы
             LinearGradient(
                 gradient: Gradient(colors: [
                     viewModel.backgroundColor,
@@ -449,6 +894,13 @@ struct ContentView: View {
                     Spacer()
                     
                     HStack(spacing: 8) {
+                        // Кнопка статистики
+                        Button(action: { viewModel.showingStats = true }) {
+                            Image(systemName: "chart.bar.fill")
+                                .font(.title3)
+                                .foregroundColor(.orange)
+                        }
+                        
                         // Кнопка создания задачи
                         Button(action: { viewModel.startCreatingTask() }) {
                             Image(systemName: "plus.circle.fill")
@@ -614,6 +1066,9 @@ struct ContentView: View {
         .sheet(isPresented: $viewModel.showingTaskEditor) {
             TaskEditorView(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.showingStats) {
+            StatsView(viewModel: viewModel)
+        }
         .alert("Timer Complete! 🎉", isPresented: $viewModel.showCompletionAlert) {
             Button("OK") { }
         } message: {
@@ -673,7 +1128,6 @@ struct TaskCard: View {
                 
                 Spacer()
                 
-                // Количество сессий
                 HStack(spacing: 2) {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.caption)
@@ -685,7 +1139,6 @@ struct TaskCard: View {
             }
             
             HStack(spacing: 8) {
-                // Кнопка выбора задачи
                 Button(action: onSelect) {
                     Text(isActive ? "Active" : "Select")
                         .font(.caption2)
@@ -701,7 +1154,6 @@ struct TaskCard: View {
                 
                 Spacer()
                 
-                // Кнопки редактирования и удаления
                 HStack(spacing: 6) {
                     Button(action: onEdit) {
                         Image(systemName: "pencil")
@@ -751,7 +1203,6 @@ struct TaskEditorView: View {
                         .textInputAutocapitalization(.sentences)
                         .focused($isTitleFocused)
                         .onAppear {
-                            // Автоматически показываем клавиатуру при появлении
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                                 isTitleFocused = true
                             }
@@ -761,7 +1212,6 @@ struct TaskEditorView: View {
                         .textInputAutocapitalization(.sentences)
                         .focused($isDescriptionFocused)
                         .onSubmit {
-                            // Переход к следующему полю или сохранение
                             if viewModel.taskTitle.isEmpty {
                                 isTitleFocused = true
                             } else {
@@ -801,7 +1251,6 @@ struct TaskEditorView: View {
                     .disabled(viewModel.taskTitle.isEmpty)
                 }
                 
-                // Кнопка "Done" для скрытия клавиатуры
                 ToolbarItem(placement: .keyboard) {
                     HStack {
                         Spacer()
@@ -816,7 +1265,6 @@ struct TaskEditorView: View {
         }
         .presentationDetents([.medium])
         .onDisappear {
-            // Скрываем клавиатуру при закрытии
             isTitleFocused = false
             isDescriptionFocused = false
         }
