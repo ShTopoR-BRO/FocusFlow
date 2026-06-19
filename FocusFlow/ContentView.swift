@@ -2,6 +2,25 @@ import SwiftUI
 import Combine
 import UserNotifications
 
+// MARK: - Модель задачи
+struct Task: Identifiable, Codable {
+    let id: UUID
+    var title: String
+    var description: String?
+    var completedSessions: Int
+    var createdAt: Date
+    var isActive: Bool
+    
+    init(id: UUID = UUID(), title: String, description: String? = nil, completedSessions: Int = 0, isActive: Bool = false) {
+        self.id = id
+        self.title = title
+        self.description = description
+        self.completedSessions = completedSessions
+        self.createdAt = Date()
+        self.isActive = isActive
+    }
+}
+
 // MARK: - Модель данных
 enum TimerMode: String, CaseIterable {
     case focus = "Focus Session"
@@ -63,17 +82,24 @@ class TimerViewModel: ObservableObject {
     @Published var timeRemaining: TimeInterval
     @Published var timerMode: TimerMode = .focus
     @Published var isRunning = false
-    @Published var activeTaskName = "Design Homepage"
     @Published var completedPomodoros = 0
     @Published var showCompletionAlert = false
     @Published var completionMessage = ""
     @Published var isDarkMode = false
+    @Published var tasks: [Task] = []
+    @Published var activeTaskId: UUID?
+    @Published var showingTaskEditor = false
+    @Published var editingTask: Task?
+    @Published var taskTitle = ""
+    @Published var taskDescription = ""
     
     // MARK: - Private Properties
     private var timer: Timer?
     private var initialDuration: TimeInterval
     private let notificationCenter = UNUserNotificationCenter.current()
     private let pomodorosBeforeLongBreak = 4
+    private let tasksKey = "savedTasks"
+    private let activeTaskIdKey = "activeTaskId"
     
     // MARK: - Computed Properties
     var progress: Double {
@@ -111,17 +137,32 @@ class TimerViewModel: ObservableObject {
         isDarkMode ? .gray : .secondary
     }
     
+    var activeTask: Task? {
+        tasks.first { $0.id == activeTaskId }
+    }
+    
+    var activeTaskName: String {
+        activeTask?.title ?? "No Active Task"
+    }
+    
     // MARK: - Initialization
     init() {
         self.initialDuration = TimerMode.focus.duration
         self.timeRemaining = initialDuration
-        requestNotificationPermission()
+        loadTasks()
         loadThemePreference()
+        requestNotificationPermission()
     }
     
-    // MARK: - Public Methods
+    // MARK: - Timer Methods
     func startTimer() {
         guard !isRunning else { return }
+        guard activeTask != nil else {
+            completionMessage = "Please select a task first!"
+            showCompletionAlert = true
+            return
+        }
+        
         isRunning = true
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
@@ -156,9 +197,85 @@ class TimerViewModel: ObservableObject {
         completedPomodoros = 0
     }
     
-    func toggleTheme() {
-        isDarkMode.toggle()
-        saveThemePreference()
+    // MARK: - Task Management
+    func createTask(title: String, description: String?) {
+        let newTask = Task(title: title, description: description)
+        tasks.append(newTask)
+        saveTasks()
+        clearTaskEditor()
+    }
+    
+    func updateTask(_ task: Task) {
+        guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        tasks[index] = task
+        saveTasks()
+        clearTaskEditor()
+    }
+    
+    func deleteTask(_ task: Task) {
+        tasks.removeAll { $0.id == task.id }
+        if activeTaskId == task.id {
+            activeTaskId = nil
+            saveActiveTaskId()
+        }
+        saveTasks()
+    }
+    
+    func selectTask(_ task: Task) {
+        // Деактивируем все задачи
+        for index in tasks.indices {
+            tasks[index].isActive = false
+        }
+        
+        // Активируем выбранную
+        if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+            tasks[index].isActive = true
+            activeTaskId = task.id
+        }
+        
+        saveTasks()
+        saveActiveTaskId()
+    }
+    
+    func addSessionToActiveTask() {
+        guard let taskId = activeTaskId,
+              let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        tasks[index].completedSessions += 1
+        saveTasks()
+    }
+    
+    func startEditingTask(_ task: Task) {
+        editingTask = task
+        taskTitle = task.title
+        taskDescription = task.description ?? ""
+        showingTaskEditor = true
+    }
+    
+    func startCreatingTask() {
+        editingTask = nil
+        taskTitle = ""
+        taskDescription = ""
+        showingTaskEditor = true
+    }
+    
+    func saveTaskEditor() {
+        guard !taskTitle.isEmpty else { return }
+        
+        if let editingTask = editingTask {
+            var updatedTask = editingTask
+            updatedTask.title = taskTitle
+            updatedTask.description = taskDescription.isEmpty ? nil : taskDescription
+            updateTask(updatedTask)
+        } else {
+            createTask(title: taskTitle, description: taskDescription.isEmpty ? nil : taskDescription)
+        }
+    }
+    
+    func clearTaskEditor() {
+        editingTask = nil
+        taskTitle = ""
+        taskDescription = ""
+        showingTaskEditor = false
     }
     
     // MARK: - Private Methods
@@ -176,12 +293,15 @@ class TimerViewModel: ObservableObject {
     
     private func handleFocusCompletion() {
         completedPomodoros += 1
+        addSessionToActiveTask()
         
         let nextMode: TimerMode = shouldStartLongBreak ? .longBreak : .shortBreak
         
+        let taskName = activeTask?.title ?? "Unknown Task"
         completionMessage = """
         ✅ Focus Session Complete!
         🍅 Pomodoros completed: \(completedPomodoros)
+        📝 Task: \(taskName)
         \(shouldStartLongBreak ? "☕️ Time for a Long Break!" : "🌿 Time for a Short Break!")
         """
         
@@ -242,6 +362,42 @@ class TimerViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Persistence
+    private func saveTasks() {
+        if let encoded = try? JSONEncoder().encode(tasks) {
+            UserDefaults.standard.set(encoded, forKey: tasksKey)
+        }
+    }
+    
+    private func loadTasks() {
+        guard let data = UserDefaults.standard.data(forKey: tasksKey),
+              let decoded = try? JSONDecoder().decode([Task].self, from: data) else {
+            // Создаем пример задачи при первом запуске
+            let sampleTask = Task(title: "Sample Task", description: "This is a sample task")
+            tasks = [sampleTask]
+            activeTaskId = sampleTask.id
+            saveTasks()
+            saveActiveTaskId()
+            return
+        }
+        tasks = decoded
+        loadActiveTaskId()
+    }
+    
+    private func saveActiveTaskId() {
+        if let id = activeTaskId {
+            UserDefaults.standard.set(id.uuidString, forKey: activeTaskIdKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: activeTaskIdKey)
+        }
+    }
+    
+    private func loadActiveTaskId() {
+        guard let idString = UserDefaults.standard.string(forKey: activeTaskIdKey),
+              let id = UUID(uuidString: idString) else { return }
+        activeTaskId = id
+    }
+    
     private func saveThemePreference() {
         UserDefaults.standard.set(isDarkMode, forKey: "isDarkMode")
     }
@@ -258,7 +414,6 @@ class TimerViewModel: ObservableObject {
 // MARK: - Основное представление
 struct ContentView: View {
     @StateObject private var viewModel = TimerViewModel()
-    @Environment(\.colorScheme) var systemColorScheme
     
     var body: some View {
         ZStack {
@@ -273,10 +428,9 @@ struct ContentView: View {
             )
             .ignoresSafeArea()
             
-            VStack(spacing: 30) {
-                // Верхняя панель с переключателем темы
+            VStack(spacing: 20) {
+                // Верхняя панель
                 HStack {
-                    // Название активной задачи
                     VStack(alignment: .leading, spacing: 4) {
                         Text(viewModel.activeTaskName)
                             .font(.title2)
@@ -294,25 +448,38 @@ struct ContentView: View {
                     
                     Spacer()
                     
-                    // Переключатель темной темы
-                    ThemeToggleButton(isDarkMode: $viewModel.isDarkMode)
+                    HStack(spacing: 8) {
+                        // Кнопка создания задачи
+                        Button(action: { viewModel.startCreatingTask() }) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.title3)
+                                .foregroundColor(viewModel.timerColor)
+                        }
+                        
+                        // Переключатель темной темы
+                        ThemeToggleButton(isDarkMode: $viewModel.isDarkMode)
+                    }
                 }
                 .padding(.top, 20)
                 .padding(.horizontal)
+                
+                // Список задач (если есть)
+                if !viewModel.tasks.isEmpty {
+                    TaskListView(viewModel: viewModel)
+                        .padding(.horizontal)
+                }
                 
                 Spacer()
                 
                 // Круговой индикатор прогресса
                 ZStack {
-                    // Фоновый круг
                     Circle()
                         .stroke(
                             viewModel.secondaryTextColor.opacity(0.2),
                             lineWidth: 12
                         )
-                        .frame(width: 240, height: 240)
+                        .frame(width: 220, height: 220)
                     
-                    // Прогресс
                     Circle()
                         .trim(from: 0, to: viewModel.progress)
                         .stroke(
@@ -322,14 +489,13 @@ struct ContentView: View {
                                 lineCap: .round
                             )
                         )
-                        .frame(width: 240, height: 240)
+                        .frame(width: 220, height: 220)
                         .rotationEffect(.degrees(-90))
                         .animation(.easeInOut(duration: 0.5), value: viewModel.progress)
                     
-                    // Оставшееся время
                     VStack(spacing: 4) {
                         Text(viewModel.formattedTime)
-                            .font(.system(size: 52, weight: .thin, design: .rounded))
+                            .font(.system(size: 48, weight: .thin, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(viewModel.textColor)
                         
@@ -338,14 +504,14 @@ struct ContentView: View {
                             .foregroundColor(viewModel.secondaryTextColor)
                     }
                 }
-                .padding()
+                .padding(.vertical, 10)
                 
                 // Текущий режим работы
                 Text(viewModel.timerMode.rawValue)
                     .font(.headline)
                     .foregroundColor(viewModel.secondaryTextColor)
                     .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 6)
                     .background(
                         Capsule()
                             .fill(viewModel.secondaryTextColor.opacity(0.1))
@@ -357,7 +523,7 @@ struct ContentView: View {
                         ForEach(0..<4, id: \.self) { index in
                             Circle()
                                 .fill(index < viewModel.completedPomodoros % 4 ? Color.green : viewModel.secondaryTextColor.opacity(0.3))
-                                .frame(width: 12, height: 12)
+                                .frame(width: 10, height: 10)
                         }
                         Text("until long break")
                             .font(.caption2)
@@ -368,18 +534,16 @@ struct ContentView: View {
                 Spacer()
                 
                 // Кнопки управления
-                HStack(spacing: 30) {
-                    // Кнопка сброса
+                HStack(spacing: 25) {
                     Button(action: { viewModel.resetTimer() }) {
                         Image(systemName: "arrow.counterclockwise")
                             .font(.title2)
                             .foregroundColor(.orange)
-                            .frame(width: 60, height: 60)
+                            .frame(width: 55, height: 55)
                             .background(Circle().fill(Color.orange.opacity(0.15)))
                     }
                     .disabled(viewModel.progress == 0 && !viewModel.isRunning)
                     
-                    // Кнопка паузы/запуска
                     Button(action: {
                         if viewModel.isRunning {
                             viewModel.pauseTimer()
@@ -390,7 +554,7 @@ struct ContentView: View {
                         Image(systemName: viewModel.isRunning ? "pause.fill" : "play.fill")
                             .font(.title)
                             .foregroundColor(.white)
-                            .frame(width: 80, height: 80)
+                            .frame(width: 70, height: 70)
                             .background(
                                 Circle()
                                     .fill(viewModel.isRunning ? Color.yellow : viewModel.timerColor)
@@ -398,27 +562,26 @@ struct ContentView: View {
                             )
                     }
                     
-                    // Кнопка стоп
                     Button(action: {
                         viewModel.pauseTimer()
                     }) {
                         Image(systemName: "stop.fill")
                             .font(.title2)
                             .foregroundColor(.red)
-                            .frame(width: 60, height: 60)
+                            .frame(width: 55, height: 55)
                             .background(Circle().fill(Color.red.opacity(0.15)))
                     }
                     .disabled(!viewModel.isRunning)
                 }
-                .padding(.vertical)
+                .padding(.vertical, 10)
                 
                 // Режимы работы
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     ForEach(TimerMode.allCases, id: \.self) { mode in
                         Button(action: {
                             viewModel.switchMode(to: mode)
                         }) {
-                            VStack(spacing: 4) {
+                            VStack(spacing: 3) {
                                 Image(systemName: mode.icon)
                                     .font(.title3)
                                 Text(mode.rawValue)
@@ -428,7 +591,7 @@ struct ContentView: View {
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.8)
                             }
-                            .frame(width: 80, height: 70)
+                            .frame(width: 75, height: 65)
                             .foregroundColor(viewModel.timerMode == mode ? .white : viewModel.textColor)
                             .background(
                                 RoundedRectangle(cornerRadius: 12)
@@ -443,16 +606,221 @@ struct ContentView: View {
                     }
                 }
                 .padding(.horizontal)
-                .padding(.bottom, 30)
+                .padding(.bottom, 20)
             }
             .padding()
         }
         .preferredColorScheme(viewModel.isDarkMode ? .dark : .light)
+        .sheet(isPresented: $viewModel.showingTaskEditor) {
+            TaskEditorView(viewModel: viewModel)
+        }
         .alert("Timer Complete! 🎉", isPresented: $viewModel.showCompletionAlert) {
             Button("OK") { }
         } message: {
             Text(viewModel.completionMessage)
         }
+    }
+}
+
+// MARK: - Список задач
+struct TaskListView: View {
+    @ObservedObject var viewModel: TimerViewModel
+    
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(viewModel.tasks) { task in
+                    TaskCard(
+                        task: task,
+                        isActive: task.id == viewModel.activeTaskId,
+                        onSelect: { viewModel.selectTask(task) },
+                        onEdit: { viewModel.startEditingTask(task) },
+                        onDelete: { viewModel.deleteTask(task) }
+                    )
+                }
+            }
+            .padding(.vertical, 5)
+        }
+    }
+}
+
+// MARK: - Карточка задачи
+struct TaskCard: View {
+    let task: Task
+    let isActive: Bool
+    let onSelect: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+    
+    @State private var showingDeleteConfirmation = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(task.title)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                    
+                    if let description = task.description {
+                        Text(description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                
+                Spacer()
+                
+                // Количество сессий
+                HStack(spacing: 2) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption)
+                    Text("\(task.completedSessions)")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                }
+                .foregroundColor(.green)
+            }
+            
+            HStack(spacing: 8) {
+                // Кнопка выбора задачи
+                Button(action: onSelect) {
+                    Text(isActive ? "Active" : "Select")
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                        .foregroundColor(isActive ? .white : .blue)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(isActive ? Color.green : Color.blue.opacity(0.1))
+                        )
+                }
+                
+                Spacer()
+                
+                // Кнопки редактирования и удаления
+                HStack(spacing: 6) {
+                    Button(action: onEdit) {
+                        Image(systemName: "pencil")
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                    }
+                    
+                    Button(action: { showingDeleteConfirmation = true }) {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(width: 200, height: 80)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(isActive ? Color.green.opacity(0.1) : Color.gray.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(isActive ? Color.green : Color.gray.opacity(0.2), lineWidth: 1)
+                )
+        )
+        .alert("Delete Task", isPresented: $showingDeleteConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) { onDelete() }
+        } message: {
+            Text("Are you sure you want to delete '\(task.title)'?")
+        }
+    }
+}
+
+// MARK: - Редактор задач с автоматической клавиатурой
+struct TaskEditorView: View {
+    @ObservedObject var viewModel: TimerViewModel
+    @Environment(\.dismiss) var dismiss
+    @FocusState private var isTitleFocused: Bool
+    @FocusState private var isDescriptionFocused: Bool
+    
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("Task Details")) {
+                    TextField("Task Name", text: $viewModel.taskTitle)
+                        .textInputAutocapitalization(.sentences)
+                        .focused($isTitleFocused)
+                        .onAppear {
+                            // Автоматически показываем клавиатуру при появлении
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                isTitleFocused = true
+                            }
+                        }
+                    
+                    TextField("Description (optional)", text: $viewModel.taskDescription)
+                        .textInputAutocapitalization(.sentences)
+                        .focused($isDescriptionFocused)
+                        .onSubmit {
+                            // Переход к следующему полю или сохранение
+                            if viewModel.taskTitle.isEmpty {
+                                isTitleFocused = true
+                            } else {
+                                isDescriptionFocused = false
+                                viewModel.saveTaskEditor()
+                                dismiss()
+                            }
+                        }
+                }
+                
+                if viewModel.editingTask != nil {
+                    Section {
+                        Button("Delete Task", role: .destructive) {
+                            if let task = viewModel.editingTask {
+                                viewModel.deleteTask(task)
+                                dismiss()
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle(viewModel.editingTask != nil ? "Edit Task" : "New Task")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        viewModel.clearTaskEditor()
+                        dismiss()
+                    }
+                }
+                
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        viewModel.saveTaskEditor()
+                        dismiss()
+                    }
+                    .disabled(viewModel.taskTitle.isEmpty)
+                }
+                
+                // Кнопка "Done" для скрытия клавиатуры
+                ToolbarItem(placement: .keyboard) {
+                    HStack {
+                        Spacer()
+                        Button("Done") {
+                            isTitleFocused = false
+                            isDescriptionFocused = false
+                        }
+                        .fontWeight(.medium)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .onDisappear {
+            // Скрываем клавиатуру при закрытии
+            isTitleFocused = false
+            isDescriptionFocused = false
+        }
+        .interactiveDismissDisabled()
     }
 }
 
@@ -462,18 +830,18 @@ struct ThemeToggleButton: View {
     
     var body: some View {
         Button(action: { isDarkMode.toggle() }) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: isDarkMode ? "moon.fill" : "sun.max.fill")
-                    .font(.title3)
+                    .font(.subheadline)
                     .foregroundColor(isDarkMode ? .yellow : .orange)
                 
                 Text(isDarkMode ? "Dark" : "Light")
-                    .font(.caption)
+                    .font(.caption2)
                     .fontWeight(.medium)
                     .foregroundColor(.primary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
             .background(
                 Capsule()
                     .fill(Color.gray.opacity(0.15))
@@ -495,6 +863,7 @@ struct ContentView_Previews: PreviewProvider {
             .preferredColorScheme(.dark)
     }
 }
+
 #Preview {
     ContentView()
 }
