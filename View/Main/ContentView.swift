@@ -201,6 +201,7 @@ struct ContentView: View {
             }
             .padding()
         }
+        
         .preferredColorScheme(viewModel.isDarkMode ? .dark : .light)
         .sheet(isPresented: $viewModel.showingTaskEditor) {
             TaskEditorView(viewModel: viewModel)
