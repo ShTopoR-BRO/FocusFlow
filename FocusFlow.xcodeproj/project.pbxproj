@@ -30,19 +30,24 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		F284CC2B2FE3BBA9009C1968 /* FocusFlow */ = {
+		F24D5C482FEE40F200394AE6 /* Models */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = FocusFlow;
+			path = Models;
 			sourceTree = "<group>";
 		};
-		F284CC392FE3BBAA009C1968 /* FocusFlowTests */ = {
+		F24D5C492FEE410400394AE6 /* ViewModels */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = FocusFlowTests;
+			path = ViewModels;
 			sourceTree = "<group>";
 		};
-		F284CC432FE3BBAA009C1968 /* FocusFlowUITests */ = {
+		F24D5C4A2FEE412100394AE6 /* App */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = FocusFlowUITests;
+			path = App;
+			sourceTree = "<group>";
+		};
+		F284CC2B2FE3BBA9009C1968 /* View */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = View;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -75,9 +80,10 @@
 		F284CC202FE3BBA9009C1968 = {
 			isa = PBXGroup;
 			children = (
-				F284CC2B2FE3BBA9009C1968 /* FocusFlow */,
-				F284CC392FE3BBAA009C1968 /* FocusFlowTests */,
-				F284CC432FE3BBAA009C1968 /* FocusFlowUITests */,
+				F24D5C4A2FEE412100394AE6 /* App */,
+				F24D5C492FEE410400394AE6 /* ViewModels */,
+				F24D5C482FEE40F200394AE6 /* Models */,
+				F284CC2B2FE3BBA9009C1968 /* View */,
 				F284CC2A2FE3BBA9009C1968 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -108,7 +114,10 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				F284CC2B2FE3BBA9009C1968 /* FocusFlow */,
+				F24D5C482FEE40F200394AE6 /* Models */,
+				F24D5C492FEE410400394AE6 /* ViewModels */,
+				F24D5C4A2FEE412100394AE6 /* App */,
+				F284CC2B2FE3BBA9009C1968 /* View */,
 			);
 			name = FocusFlow;
 			packageProductDependencies = (
@@ -130,9 +139,6 @@
 			dependencies = (
 				F284CC382FE3BBAA009C1968 /* PBXTargetDependency */,
 			);
-			fileSystemSynchronizedGroups = (
-				F284CC392FE3BBAA009C1968 /* FocusFlowTests */,
-			);
 			name = FocusFlowTests;
 			packageProductDependencies = (
 			);
@@ -152,9 +158,6 @@
 			);
 			dependencies = (
 				F284CC422FE3BBAA009C1968 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				F284CC432FE3BBAA009C1968 /* FocusFlowUITests */,
 			);
 			name = FocusFlowUITests;
 			packageProductDependencies = (
